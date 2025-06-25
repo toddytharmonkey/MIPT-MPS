@@ -118,7 +118,7 @@ function run_single_trial_exact(params)
     N, l, p, renyi_alpha = params.N, params.l, params.p, params.renyi_alpha
     
     indices = siteinds("Qubit", N)
-    state = onehot(ComplexF64, indices...)
+    state = onehot(ComplexF64, (idx => 1 for idx in indices)...)
 
     for _ in 1:l
         # Unitary layers
@@ -195,15 +195,17 @@ function random_unitary_gate(s1::Index, s2::Index)
     Q, _ = qr(M)
     return ITensor(Matrix(Q), s2', s1', s2, s1)
 end
-
-# --- Data saving function ---
-function save_results(df::DataFrame, param_space::Dict)
+function save_results(df::DataFrame, param_space::Dict, mode::Symbol)
     timestamp = Dates.format(now(), "YYYY-mm-dd_HH-MM-SS")
-    filename = "MIPT_sweep_results_$(timestamp).jld2"
+    
+    # (MODIFIED) - The `mode` argument is now used to create a descriptive filename
+    filename = "MIPT_sweep_$(mode)_$(timestamp).jld2"
+    
     println("\nSaving results to JLD2 file: $(filename)")
     
-    # Save the DataFrame and the parameter space dictionary that generated it
-    jldsave(filename; df=df, param_space=param_space)
+    # (MODIFIED) - The `mode` is also saved inside the file for full reproducibility
+    jldsave(filename; df=df, param_space=param_space, mode=mode)
+    
     println("File saved.")
     return filename
 end
@@ -213,14 +215,18 @@ function renyi_entropy(ψ::ITensor, region::Vector{<:Index}, α::Real)
     # This performs an SVD on the bipartition
     U, S, V = svd(ψ, region)
     
-    # The diagonal elements of S are the singular values
-    # The squared singular values are the eigenvalues of the reduced density matrix
-    p = diag(array(S, commoninds(S,V), commoninds(S,U))) .^ 2
+    # The diagonal elements of the S ITensor are the singular values.
+    # The squared singular values are the eigenvalues of the reduced density matrix.
+    
+    # (MODIFIED) - Get the diagonal elements directly from the S tensor.
+    # This is more efficient and avoids the permute/array error.
+    p = diag(S) .^ 2
     
     # Filter out zero probabilities for numerical stability with log
     p = p[p .> 1e-12]
 
     if α == 1.0 # Von Neumann entropy
+        # Note: log is base e in Julia
         return -sum(p .* log.(p))
     else # Rényi-α entropy
         return (1 / (1 - α)) * log(sum(p .^ α))
