@@ -1,42 +1,50 @@
 # File: run_experiments.jl
 
-# --- Include the simulation engine and its functions ---
 include("MIPT_SimTools.jl")
 using .MIPT_SimTools
+using Dates
 
 # ------------------------------------------------------------------
-# 1. DEFINE YOUR EXPERIMENT
+# 1. CHOOSE YOUR SIMULATOR
 # ------------------------------------------------------------------
-# Define the lists of parameters you want to sweep over.
-# The code will run all combinations of these parameters.
-# To fix a parameter, just provide a single-element list e.g., `:N => [12]`.
+# Options: :MPS or :EXACT
+const SIMULATOR_MODE = :EXACT
+
+# ------------------------------------------------------------------
+# 2. DEFINE YOUR EXPERIMENT PARAMETERS
+# ------------------------------------------------------------------
+# The code will select the appropriate parameters based on the mode.
+# Note: The exact simulator is much slower and memory-intensive!
+# N > 14 can be very challenging.
 
 const param_space = Dict(
-    :N           => [12],
-    :l           => [24, 48, 72, 96, 120, 160],
-    :p           => [0.20], # Fixed p for a layer sweep
-    :maxdim      => [64],
-    :renyi_alpha => [2.0]     # 2.0 for Rényi-2, 1.0 for von Neumann
-)
+    # --- Common Parameters ---
+    :N           => [4],
+    :l           => [80], # Example: Sweeping depth for the exact sim
+    :p           => [0.2],
+    :renyi_alpha => [1.0],         # 1.0 for von Neumann, 2.0 for Rényi-2
 
-# Example for a probability sweep:
-# const param_space = Dict(
-#     :N           => [12, 16],
-#     :l           => [120],
-#     :p           => 0.0:0.02:0.3,
-#     :maxdim      => [64],
-#     :renyi_alpha => [2.0]
-# )
+    # --- MPS-Specific Parameters (ignored in :EXACT mode) ---
+    :maxdim      => [64],
+    :cutoff      => [1e-8]
+)
 
 const num_trials = 100
 
 # ------------------------------------------------------------------
-# 2. RUN EXPERIMENT AND SAVE RESULTS
+# 3. RUN EXPERIMENT AND SAVE RESULTS
 # ------------------------------------------------------------------
 # Start Julia with `julia -t auto` for parallel execution.
-println("Starting experiment at $(now())")
+println("Starting experiment: $(SIMULATOR_MODE) mode at $(now())")
 
-results_dataframe = run_parameter_sweep(param_space, num_trials)
-save_results(results_dataframe, param_space)
+if SIMULATOR_MODE == :MPS
+    results_dataframe = run_parameter_sweep(param_space, num_trials)
+elseif SIMULATOR_MODE == :EXACT
+    results_dataframe = run_parameter_sweep_exact(param_space, num_trials)
+else
+    error("Invalid SIMULATOR_MODE. Choose :MPS or :EXACT.")
+end
+
+save_results(results_dataframe, param_space, SIMULATOR_MODE)
 
 println("\nExperiment finished at $(now())")
