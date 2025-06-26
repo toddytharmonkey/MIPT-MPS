@@ -8,7 +8,7 @@ using Dates
 # 1. CHOOSE YOUR SIMULATOR
 # ------------------------------------------------------------------
 # Options: :MPS or :EXACT
-const SIMULATOR_MODE = :EXACT
+const SIMULATOR_MODE = :MPS
 
 # ------------------------------------------------------------------
 # 2. DEFINE YOUR EXPERIMENT PARAMETERS
@@ -19,10 +19,10 @@ const SIMULATOR_MODE = :EXACT
 
 const param_space = Dict(
     # --- Common Parameters ---
-    :N           => [4],
+    :N           => [8],
     :l           => [80], # Example: Sweeping depth for the exact sim
-    :p           => [0.2],
-    :renyi_alpha => [1.0],         # 1.0 for von Neumann, 2.0 for Rényi-2
+    :p           => [0,0.2,0.4,0.6,0.8],
+    :renyi_alpha => [2.0],         # 1.0 for von Neumann, 2.0 for Rényi-2
 
     # --- MPS-Specific Parameters (ignored in :EXACT mode) ---
     :maxdim      => [64],

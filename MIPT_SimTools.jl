@@ -40,22 +40,24 @@ function run_single_trial(params)
             normalize!(psi)
         end
         
-        # Measurement layer
-        ops = OpSum()
-        measured_something = false
+       # --- (BUGFIX) Measurement Layer: Apply projectors sequentially ---
         for j in 1:N
             if rand() < p
-                measured_something = true
+                # 1. Calculate the probability for the current state `psi`
                 prob_1 = expect(psi, "Proj1"; sites=j)[1]
-                outcome = rand() < prob_1 ? "Proj1" : "Proj0"
-                add!(ops, outcome, j)
+                
+                # 2. Choose the measurement outcome randomly
+                outcome_op_name = rand() < prob_1 ? "Proj1" : "Proj0"
+                
+                # 3. Create the single-site projector gate
+                proj_gate = op(outcome_op_name, sites[j])
+                
+                # 4. Apply the projector immediately and re-normalize
+                # This collapses the state before the next measurement.
+                psi = apply(proj_gate, psi; cutoff, maxdim)
+                normalize!(psi)
             end
-        end
-        if measured_something
-            meas_mpo = MPO(ops, sites)
-            psi = apply(meas_mpo, psi; cutoff, maxdim)
-            normalize!(psi)
-        end
+        end 
     end
 
     # Entropy calculation
@@ -113,42 +115,49 @@ end
 # SECTION 2: EXACT (FULL STATE VECTOR) SIMULATOR
 # ==================================================================
 
+# (This function goes inside your MIPT_SimTools.jl module)
+
 function run_single_trial_exact(params)
-    # Unpack parameters - note there is no `maxdim` or `cutoff`
+    # Unpack parameters
     N, l, p, renyi_alpha = params.N, params.l, params.p, params.renyi_alpha
     
     indices = siteinds("Qubit", N)
     state = onehot(ComplexF64, (idx => 1 for idx in indices)...)
 
     for _ in 1:l
-        # Unitary layers
-        start_site = l % 2 == 1 ? 1 : 2
-        for j = start_site:2:(N-1)
+        # (BUGFIX) - The unitary circuit structure now matches the MPS version.
+        # It applies a full "brick wall" layer (even and odd bonds) for each `l`.
+        #
+        # Apply to even bonds
+        for j in 1:2:N-1
+            U_tensor = random_unitary_gate(indices[j], indices[j+1])
+            state = apply(U_tensor, state)
+            state /= norm(state)
+        end
+        # Apply to odd bonds
+        for j in 2:2:N-1
             U_tensor = random_unitary_gate(indices[j], indices[j+1])
             state = apply(U_tensor, state)
             state /= norm(state)
         end
         
-        # Measurement layer
+        # Measurement layer (this part was correct)
         for j = 1:N
             if rand() < p
                 site_index = indices[j]
-                P0 = op("Proj0", site_index)
                 
                 # Compute probability of measuring 0
-                ψ_temp = apply(P0, state)
+                ψ_temp = apply(op("Proj0", site_index), state)
                 p0 = real(inner(ψ_temp, ψ_temp))
                 
-                # Decide which projector to apply based on Born rule
                 Proj_tensor = rand() < p0 ? op("Proj0", site_index) : op("Proj1", site_index)
                 
                 state = apply(Proj_tensor, state)
-                state /= norm(state) # Normalize after projection
+                state /= norm(state)
             end
         end
     end
 
-    # Entropy calculation using the same consistent tool
     bipartition_site = N ÷ 2
     region = indices[1:bipartition_site]
     return renyi_entropy(state, region, renyi_alpha)
