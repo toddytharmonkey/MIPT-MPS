@@ -95,9 +95,16 @@ function run_parameter_sweep(param_space::Dict, num_trials::Int)
         
         trial_entropies = Vector{Float64}(undef, num_trials)
 
+        desc = @sprintf "  Trials (N=%d, p=%.2f)..." params.N params.p
+        prog = Progress(num_trials, desc)
+        progress_lock = ReentrantLock()
+
         # We can still parallelize the trials for each parameter set
         Threads.@threads for trial in 1:num_trials
             trial_entropies[trial] = run_single_trial(params)
+            lock(progress_lock) do
+                next!(prog)
+            end
         end
 
         # Calculate statistics and add a row to the DataFrame
@@ -182,8 +189,16 @@ function run_parameter_sweep_exact(param_space::Dict, num_trials::Int)
         
         trial_entropies = Vector{Float64}(undef, num_trials)
         # Using the same parallel trial structure
+
+        desc = @sprintf "  Trials (N=%d, p=%.2f)..." params.N params.p
+        prog = Progress(num_trials, desc)
+        progress_lock = ReentrantLock()
+
         Threads.@threads for trial in 1:num_trials
             trial_entropies[trial] = run_single_trial_exact(params)
+            lock(progress_lock) do
+                next!(prog)
+            end
         end
 
         mean_S = sum(trial_entropies) / num_trials
@@ -204,6 +219,7 @@ function random_unitary_gate(s1::Index, s2::Index)
     Q, _ = qr(M)
     return ITensor(Matrix(Q), s2', s1', s2, s1)
 end
+
 function save_results(df::DataFrame, param_space::Dict, mode::Symbol)
     timestamp = Dates.format(now(), "YYYY-mm-dd_HH-MM-SS")
     
