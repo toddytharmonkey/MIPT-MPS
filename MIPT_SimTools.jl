@@ -14,6 +14,10 @@ using IterTools
 
 export run_parameter_sweep, run_parameter_sweep_exact, save_results
 
+ITensors.disable_warn_order()
+# for N ~20, the contractions might be very large and itensor will raise annoying errors
+# if not disabled here 
+
 
 # ==================================================================
 # SECTION 2: MPS SIMULATOR 
@@ -32,12 +36,12 @@ function run_single_trial(params)
         for j in 1:2:N-1
             gate = random_unitary_gate(sites[j], sites[j+1])
             psi = apply(gate, psi; cutoff, maxdim)
-            normalize!(psi)
+            # normalize!(psi)
         end
         for j in 2:2:N-1
             gate = random_unitary_gate(sites[j], sites[j+1])
             psi = apply(gate, psi; cutoff, maxdim)
-            normalize!(psi)
+            # normalize!(psi) # these normalization steps should be applied if getting numerical precision bugs
         end
         
        # --- (BUGFIX) Measurement Layer: Apply projectors sequentially ---
@@ -60,11 +64,14 @@ function run_single_trial(params)
         end 
     end
 
+    normalize!(psi)
+
     # Entropy calculation
-    bipartition_site = N ÷ 2
-    region = 1:bipartition_site
-    Sn = ee_region(psi, collect(region); ee_type=EEType("Renyi"), n=renyi_alpha)
-    return Sn
+    # bipartition_site = N ÷ 2
+    # region = 1:bipartition_site
+    # Sn = ee_region(psi, collect(region); ee_type=EEType("Renyi"), n=renyi_alpha)
+    # return Sn
+    # code above is commented out as ee_region may actually be inefficient
 end
 
 # --- The main runner function that handles parameter sweeps and parallelization ---
