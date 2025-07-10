@@ -18,61 +18,77 @@ ITensors.disable_warn_order()
 # for N ~20, the contractions might be very large and itensor will raise annoying errors
 # if not disabled here 
 
+println("Julia is using ", Threads.nthreads(), " threads for parallel loops.")
+println("BLAS library is configured to use ", BLAS.get_num_threads(), " threads for linear algebra.")
 
 # ==================================================================
 # SECTION 2: MPS SIMULATOR 
 # ==================================================================
 
 # --- The function for a SINGLE trial, now takes a NamedTuple of parameters ---
-function run_single_trial(params)
+function run_single_trial(params, num_trials)
     # Unpack parameters
     N, l, p, maxdim, cutoff, renyi_alpha = params.N, params.l, params.p, params.maxdim, params.cutoff, params.renyi_alpha
     
     sites = siteinds("Qubit", N)
     psi = MPS(sites, "0")
 
-    for _ in 1:l
-        # Unitary layers with normalization
-        for j in 1:2:N-1
-            gate = random_unitary_gate(sites[j], sites[j+1])
-            psi = apply(gate, psi; cutoff, maxdim)
-            # normalize!(psi)
+    # (MODIFIED) Conditionally show the layer progress bar
+    if num_trials == 1
+        # If we are in single-shot mode, show the detailed progress of the layers.
+        @showprogress "Evolving layers..." for _ in 1:l
+            apply_one_layer_mps!(psi, sites, p; cutoff=cutoff, maxdim=maxdim)
         end
-        for j in 2:2:N-1
-            gate = random_unitary_gate(sites[j], sites[j+1])
-            psi = apply(gate, psi; cutoff, maxdim)
-            # normalize!(psi) # these normalization steps should be applied if getting numerical precision bugs
+    else
+        # Otherwise (in multi-trial mode), do not show the inner progress bar.
+        for _ in 1:l
+            apply_one_layer_mps!(psi, sites, p; cutoff=cutoff, maxdim=maxdim)
         end
-        
-       # --- (BUGFIX) Measurement Layer: Apply projectors sequentially ---
-        for j in 1:N
-            if rand() < p
-                # 1. Calculate the probability for the current state `psi`
-                prob_1 = expect(psi, "Proj1"; sites=j)[1]
-                
-                # 2. Choose the measurement outcome randomly
-                outcome_op_name = rand() < prob_1 ? "Proj1" : "Proj0"
-                
-                # 3. Create the single-site projector gate
-                proj_gate = op(outcome_op_name, sites[j])
-                
-                # 4. Apply the projector immediately and re-normalize
-                # This collapses the state before the next measurement.
-                psi = apply(proj_gate, psi; cutoff, maxdim)
-                normalize!(psi)
-            end
-        end 
     end
 
     normalize!(psi)
 
-    # Entropy calculation
-    # bipartition_site = N ÷ 2
-    # region = 1:bipartition_site
-    # Sn = ee_region(psi, collect(region); ee_type=EEType("Renyi"), n=renyi_alpha)
-    # return Sn
+    #Entropy calculation
+    bipartition_site = N ÷ 2
+    region = 1:bipartition_site
+    Sn = ee_region(psi, collect(region); ee_type=EEType("Renyi"), n=renyi_alpha)
+    return Sn
+end 
     # code above is commented out as ee_region may actually be inefficient
+
+    # code copy/pasted from MPS and MPO examples page on ITensorMPS.jl
+#=     b = N ÷ 2
+    psi = orthogonalize(psi, b)
+    U,S,V = svd(psi[b], (linkinds(psi, b-1)..., siteinds(psi, b)...))
+    SvN = 0.0
+    for n=1:dim(S, 1)
+    p = S[n,n]^2
+    SvN -= p * log(p)
+    end
+    return SvN =#
+# end
+
+# (NEW) Helper function to improve readability
+function apply_one_layer_mps!(psi, sites, p; cutoff, maxdim)
+    N = length(psi)
+    # Unitary Layers
+    for j in 1:2:N-1; gate = random_unitary_gate(sites[j], sites[j+1]); psi = apply(gate, psi; cutoff, maxdim); end
+    for j in 2:2:N-1; gate = random_unitary_gate(sites[j], sites[j+1]); psi = apply(gate, psi; cutoff, maxdim); end
+    normalize!(psi)
+    # Measurement Layer (only if p > 0)
+    if p > 0
+        for j in 1:N
+            if rand() < p
+                prob_1 = expect(psi, "Proj1"; sites=j)[1]
+                outcome_op_name = rand() < prob_1 ? "Proj1" : "Proj0"
+                proj_gate = op(outcome_op_name, sites[j])
+                psi = apply(proj_gate, psi; cutoff, maxdim)
+                normalize!(psi)
+            end
+        end
+    end
 end
+
 
 # --- The main runner function that handles parameter sweeps and parallelization ---
 function run_parameter_sweep(param_space::Dict, num_trials::Int)
@@ -108,7 +124,7 @@ function run_parameter_sweep(param_space::Dict, num_trials::Int)
 
         # We can still parallelize the trials for each parameter set
         Threads.@threads for trial in 1:num_trials
-            trial_entropies[trial] = run_single_trial(params)
+            trial_entropies[trial] = run_single_trial(params, num_trials)
             lock(progress_lock) do
                 next!(prog)
             end
@@ -264,5 +280,113 @@ function renyi_entropy(ψ::ITensor, region::Vector{<:Index}, α::Real)
         return (1 / (1 - α)) * log(sum(p .^ α))
     end
 end
+
+# ==================================================================
+# (NEW) SECTION 4: STABILIZER RENYI ENTROPY (SRE) CALCULATION
+# ==================================================================
+
+"""
+    sample_pauli_string(psi::MPS) -> Float64
+
+Performs one perfect sampling of a Pauli string σ from the distribution Π(σ)
+for a given MPS |ψ⟩. Returns the probability Π(σ) of the sampled string.
+This algorithm is based on Lami & Collura, PRL 131, 180401 (2023). [cite: 1, 2]
+"""
+function sample_pauli_string(psi::MPS)
+    N = length(psi)
+    # Ensure the MPS is in right-normalized form for efficient contraction[cite: 65, 96].
+    orthogonalize!(psi, N)
+
+    # Define the local Pauli operators for convenience.
+    # We use siteinds from the physical space of the MPS.
+    s = siteinds(psi)
+    paulis = [op("I", s[1]), op("X", s[1]), op("Y", s[1]), op("Z", s[1])]
+
+    # The "environment" tensor L, which is iteratively updated. [cite: 102]
+    # It starts as a 1x1 scalar tensor.
+    L = ITensor(1.0)
+    # The total probability of the sampled string.
+    total_prob = 1.0
+
+    # The iterative sampling process from site 1 to N[cite: 107].
+    for i in 1:N
+        # We need the MPS tensor and its conjugate.
+        A = psi[i]
+        A_dag = dag(prime(A, s[i]))
+
+        # Calculate the four conditional probabilities for this site.
+        # This corresponds to the tensor contraction in Fig. 2(b) of the paper[cite: 88].
+        cond_probs = zeros(4)
+        for alpha in 1:4
+            # Get the local Pauli operator and its conjugate.
+            pauli_op = paulis[alpha]
+            pauli_op_dag = dag(prime(pauli_op))
+
+            # This is the core contraction to find the probability of a given Pauli
+            # at site `i`, given the previous choices encoded in `L`.
+            # C = L * A * pauli_op * A_dag * pauli_op_dag
+            # The result is a scalar tensor.
+            prob_tensor = L * A * pauli_op * A_dag * pauli_op_dag
+            cond_probs[alpha] = real(scalar(prob_tensor))
+        end
+        
+        # Normalize to get a probability distribution (accounts for 1/2 factor).
+        cond_probs ./= sum(cond_probs)
+        
+        # 5. Sample a Pauli operator based on these probabilities[cite: 107].
+        # `wsample` is a convenient way to do this.
+        # 0->I, 1->X, 2->Y, 3->Z (0-indexed)
+        # We get a 1-indexed result here: 1->I, 2->X, ...
+        chosen_alpha = wsample(1:4, cond_probs)
+
+        # 6. Update the total probability of the string[cite: 107].
+        total_prob *= cond_probs[chosen_alpha]
+
+        # 7. Update the environment tensor L for the next step[cite: 102, 107].
+        # This corresponds to Fig. 2(c) in the paper[cite: 111].
+        chosen_pauli = paulis[chosen_alpha]
+        A_contracted = A * chosen_pauli * dag(prime(A, s[i]))
+        L = L * A_contracted
+    end
+
+    return total_prob
+end
+
+
+"""
+    calculate_sre(psi::MPS, n_renyi::Real; num_samples::Int=1000) -> Float64
+
+Estimates the Stabilizer Rényi Entropy (SRE) for a given MPS |ψ⟩
+by sampling `num_samples` Pauli strings.
+"""
+function calculate_sre(psi::MPS, n_renyi::Real; num_samples::Int=1000)
+    if n_renyi <= 0
+        error("Rényi index n must be positive.")
+    end
+
+    # Perform the sampling `num_samples` times.
+    # This can be parallelized if needed, but the inner logic of `sample_pauli_string` is sequential.
+    prob_samples = [sample_pauli_string(psi) for _ in 1:num_samples]
+
+    # Use the appropriate estimator based on the Rényi index n[cite: 112, 117].
+    local q_n
+    if n_renyi == 1.0 # Shannon entropy case
+        q_n = sum(log.(prob_samples)) / num_samples
+        # M₁ = -⟨log Π⟩ - N log(2)
+        # Note: The paper's Π is (1/2^N)Tr[ρσ]^2, our Π is Tr[ρσ]^2.
+        # So our log(Π) is log(Π_paper) + N*log(2).
+        # The final result is the same. M₁ = -q_n
+        return -q_n
+    else # Rényi-n entropy case
+        # Note: The paper samples from a slightly different distribution.
+        # Here, we directly estimate ⟨Π^(n-1)⟩ over the distribution Π.
+        # The estimator from the paper is q̃ₙ = (1/N) Σ Π(σ)^(n-1)[cite: 112].
+        # This requires Π(σ) from the sampling, which our function doesn't return.
+        # A direct calculation is simpler:
+        M_n_val = sum( (1/num_samples) .* (prob_samples.^(n_renyi-1)) )
+        return (1 / (1 - n_renyi)) * log(M_n_val)
+    end
+end
+
 
 end # end module
